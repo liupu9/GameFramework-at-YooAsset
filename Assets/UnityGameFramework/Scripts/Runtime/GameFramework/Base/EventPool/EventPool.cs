@@ -9,9 +9,13 @@ namespace GameFramework
     /// <typeparam name="T">事件类型。</typeparam>
     internal sealed partial class EventPool<T> where T : BaseEventArgs
     {
+        // 事件编号, 事件处理器链表
         private readonly GameFrameworkMultiDictionary<int, EventHandler<T>> m_EventHandlers;
+        // 事件队列
         private readonly Queue<Event> m_Events;
+        // 事件, 事件处理器缓存
         private readonly Dictionary<object, LinkedListNode<EventHandler<T>>> m_CachedNodes;
+        // 事件, 事件处理器临时
         private readonly Dictionary<object, LinkedListNode<EventHandler<T>>> m_TempNodes;
         private readonly EventPoolMode m_EventPoolMode;
         private EventHandler<T> m_DefaultHandler;
@@ -59,12 +63,16 @@ namespace GameFramework
         /// <param name="realElapseSeconds">真实流逝时间，以秒为单位。</param>
         public void Update(float elapseSeconds, float realElapseSeconds)
         {
+            // 确保对共享资源的独占访问权限
             lock (m_Events)
             {
                 while (m_Events.Count > 0)
                 {
+                    // 从队列中取出一个事件
                     Event eventNode = m_Events.Dequeue();
+                    // 处理这个事件
                     HandleEvent(eventNode.Sender, eventNode.EventArgs);
+                    // 事件归还引用池
                     ReferencePool.Release(eventNode);
                 }
             }
@@ -139,6 +147,7 @@ namespace GameFramework
 
             if (!m_EventHandlers.Contains(id))
             {
+                // 第一个事件处理器
                 m_EventHandlers.Add(id, handler);
             }
             else if ((m_EventPoolMode & EventPoolMode.AllowMultiHandler) != EventPoolMode.AllowMultiHandler)
@@ -151,6 +160,7 @@ namespace GameFramework
             }
             else
             {
+                // 加入到事件处理器链表中(支持多个)
                 m_EventHandlers.Add(id, handler);
             }
         }
@@ -169,21 +179,28 @@ namespace GameFramework
 
             if (m_CachedNodes.Count > 0)
             {
+                // 举例: 1 -> b   事件处理器链表 a -> b -> c -> d  此时要正在运行的事件处理器为a
+                // 如果此时要删除b. 那需要引入一个临时变量 1 -> c (c由b.Next获取). 最后将临时数据写回缓存表 1 -> c
+                // 遍历缓存表(事件参数, 下一个事件处理器)
                 foreach (KeyValuePair<object, LinkedListNode<EventHandler<T>>> cachedNode in m_CachedNodes)
                 {
                     if (cachedNode.Value != null && cachedNode.Value.Value == handler)
                     {
+                        // 放入临时表(事件参数, 下下个事件处理器)
                         m_TempNodes.Add(cachedNode.Key, cachedNode.Value.Next);
                     }
                 }
 
                 if (m_TempNodes.Count > 0)
                 {
+                    // 遍历临时表(事件参数, 下一个事件处理器)
                     foreach (KeyValuePair<object, LinkedListNode<EventHandler<T>>> cachedNode in m_TempNodes)
                     {
+                        // 放回缓存表
                         m_CachedNodes[cachedNode.Key] = cachedNode.Value;
                     }
 
+                    // 清空临时表
                     m_TempNodes.Clear();
                 }
             }
@@ -216,8 +233,10 @@ namespace GameFramework
             }
 
             Event eventNode = Event.Create(sender, e);
+            // 确保对共享资源的独占访问权限
             lock (m_Events)
             {
+                // 将事件保存在队列中, 当前帧不处理.
                 m_Events.Enqueue(eventNode);
             }
         }
@@ -234,6 +253,7 @@ namespace GameFramework
                 throw new GameFrameworkException("Event is invalid.");
             }
 
+            // 当前帧处理. 不放到事件队列中.
             HandleEvent(sender, e);
         }
 
@@ -246,27 +266,36 @@ namespace GameFramework
         {
             bool noHandlerException = false;
             GameFrameworkLinkedListRange<EventHandler<T>> range = default(GameFrameworkLinkedListRange<EventHandler<T>>);
+            // 从事件处理器字典取出链表(支持多个)
             if (m_EventHandlers.TryGetValue(e.Id, out range))
             {
                 LinkedListNode<EventHandler<T>> current = range.First;
+                // 链表元素不为空 且 不指向尾结点
                 while (current != null && current != range.Terminal)
                 {
+                    // 设置缓存结点字典对应值: 如果当前元素的下一个结点不是尾结点, 就设置为下一个结点; 否则设置为null
                     m_CachedNodes[e] = current.Next != range.Terminal ? current.Next : null;
+                    // 执行处理
                     current.Value(sender, e);
+                    // 指向下一个结点 (避免删除链表一个结点导致链表断裂问题)
                     current = m_CachedNodes[e];
                 }
 
+                // 缓存结点字典 移除 当前事件处理器
                 m_CachedNodes.Remove(e);
             }
             else if (m_DefaultHandler != null)
             {
+                // 默认(统一)事件处理器
                 m_DefaultHandler(sender, e);
             }
             else if ((m_EventPoolMode & EventPoolMode.AllowNoHandler) == 0)
             {
+                // 如果事件不允许空处理器,就抛出异常.
                 noHandlerException = true;
             }
 
+            // 事件参数归还引用池
             ReferencePool.Release(e);
 
             if (noHandlerException)
